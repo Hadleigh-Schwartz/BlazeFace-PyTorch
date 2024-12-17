@@ -2,7 +2,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
+import cv2
 
 class BlazeBlock(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size=3, stride=1):
@@ -245,7 +245,7 @@ class BlazeFace(nn.Module):
 
         Arguments:
             img: a NumPy array of shape (H, W, 3) or a PyTorch tensor of
-                 shape (3, H, W). The image's height and width should be 
+                 shape (H, W, 3). The image's height and width should be 
                  128 pixels.
 
         Returns:
@@ -253,8 +253,51 @@ class BlazeFace(nn.Module):
         """
         if isinstance(img, np.ndarray):
             img = torch.from_numpy(img).permute((2, 0, 1))
+        if isinstance(img, torch.Tensor):
+            img = img.permute((2, 0, 1))
+        
+        og_img = img
+        og_shape = img.shape[1:]
 
-        return self.predict_on_batch(img.unsqueeze(0))[0]
+        # resize img to 128x128
+        img = F.interpolate(img.unsqueeze(0), size=(128, 128), mode='bilinear', align_corners=False).squeeze(0)
+        
+        disp_img = img.permute(1, 2, 0).detach().numpy().astype(np.uint8)
+        disp_img = np.ascontiguousarray(disp_img)   
+        # cv2.imshow("img", disp_img)
+        # cv2.waitKey(0)
+
+        detections = self.predict_on_batch(img.unsqueeze(0))[0]
+        bbox = detections[0, :4] # select only the first face
+        bbox *= 128 # based on BlazeFace/Inference.ipynb the output bbox is normalized to 0-1 so we have to unnormalize it here
+        # add margings to bbox
+        width = bbox[2] - bbox[0]
+        height = bbox[3] - bbox[1]
+        bbox[0] = max(0, bbox[0] - 0.25 * width)
+        bbox[1] = max(0, bbox[1] - 0.25 * height)
+        bbox[2] = min(128, bbox[2] + 0.25 * width)
+        bbox[3] = min(128, bbox[3] + 0.25 * height)
+        bbox_vis = bbox.detach().cpu().numpy()
+
+        # cv2.rectangle(disp_img, (int(bbox_vis[0]), int(bbox_vis[1])), (int(bbox_vis[2]), int(bbox_vis[3])), (0, 255, 0), 2)
+        # cv2.imshow("img", disp_img)
+        # cv2.waitKey(0)
+
+        # convert to bbox coordinates in original image resolution
+        bbox[0] = bbox[0] / 128 * og_shape[1]
+        bbox[1] = bbox[1] / 128 * og_shape[0]
+        bbox[2] = bbox[2] / 128 * og_shape[1]
+        bbox[3] = bbox[3] / 128 * og_shape[0]
+
+        bbox = bbox.to(torch.int64)
+
+        og_img_vis = og_img.permute(1, 2, 0).detach().numpy().astype(np.uint8)
+        og_img_vis = np.ascontiguousarray(og_img_vis)
+        # cv2.rectangle(og_img_vis, (int(bbox[0]), int(bbox[1])), (int(bbox[2]), int(bbox[3])), (0, 255, 0), 2)
+        # cv2.imshow("img", og_img_vis)
+        # cv2.waitKey(0)
+
+        return bbox
 
     def predict_on_batch(self, x):
         """Makes a prediction on a batch of images.
@@ -289,8 +332,8 @@ class BlazeFace(nn.Module):
         x = self._preprocess(x)
 
         # 2. Run the neural network:
-        with torch.no_grad():
-            out = self.__call__(x)
+        # with torch.no_grad():
+        out = self.__call__(x)
 
         # 3. Postprocess the raw predictions:
         detections = self._tensors_to_detections(out[0], out[1], self.anchors)
